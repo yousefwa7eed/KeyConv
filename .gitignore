@@ -1,0 +1,16 @@
+# مخرجات البناء
+/build/
+/dist/
+*.spec.bak
+
+# بايثون
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# بيانات التشغيل الشخصية
+settings.json
+*.log
+
+# أدوات محلية
+.freebuff/
