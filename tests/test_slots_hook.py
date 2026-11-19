@@ -153,12 +153,12 @@ def test_repeated_c_keeps_first_measurement(chord_env):
     assert events == [("capture", 1, 100)]
 
 
-def test_capture_zero_does_not_save_anything(chord_env):
-    """Ctrl+C+0: الرقم يُحتجز (لا يصل كاختصار)، ولا فتحة تُحفظ."""
+def test_zero_is_not_a_slot_chord(chord_env):
+    """الصفر ليس فتحة: يُمرَّر طبيعياً بعد C بلا أي حفظ."""
     chord, env, events, _sent, _timers = chord_env
     env.ctrl = True
     down(chord, VK_C)
-    assert down(chord, VK_0) == "swallow"
+    assert down(chord, VK_0) == "pass"
     assert events == []
 
 
@@ -234,15 +234,15 @@ def test_numpad_digits_work(chord_env):
     assert events == [("capture", 5, 100)]
 
 
-def test_paste_slot_zero_keeps_natural_paste(chord_env):
-    """Ctrl+V+0: آخر نسخة تُلصق طبيعياً؛ نحتجز الصفر فقط ونُبلغ الفتحة صفر."""
+def test_zero_after_paste_is_plain_text(chord_env):
+    """Ctrl+V ثم 0: الصفر يُكتب طبيعياً؛ اللصق الطبيعي جرى بالفعل."""
     chord, env, events, sent, timers = chord_env
     env.ctrl = True
     down(chord, VK_V)
-    assert down(chord, VK_0) == "swallow"
-    assert events == [("paste", 0, 1)]
+    assert down(chord, VK_0) == "pass"
+    assert events == []
     assert sent == []                          # لا إعادة حقن ولا تراجع
-    assert timers[0].cancelled is True
+    assert timers[0].cancelled is True         # التسلح انتهى بمفتاح آخر
 
 
 # ── حالات لا يجوز أن تتأثر ──────────────────────────────────
@@ -416,24 +416,6 @@ def test_capture_never_overwrites_slot_with_empty_text(tmp_path, monkeypatch):
     main._run_slot_capture(3, 55)
     main.flush_actions(2.0)
     assert slots_hook.get_slot(3) == "قيمة قديمة"
-
-
-def test_paste_task_slot_zero_is_noop(tmp_path, monkeypatch):
-    """الفتحة صفر = آخر نسخة: اللصق الطبيعي جرى، لا تراجع ولا كتابة كليبورد."""
-    import main
-    from test_pipeline import FakeIO
-
-    io = FakeIO()
-    io.clipboard = "آخر نسخة"
-    monkeypatch.setattr(main, "IO", io)
-    monkeypatch.setattr(main, "_wait_v_released", lambda *a, **k: True)
-    monkeypatch.setattr(slots_hook, "slots_file_path", lambda: str(tmp_path / "s.json"))
-
-    main._run_slot_paste(0)
-    main.flush_actions(2.0)
-    assert io.paste_calls == 0
-    assert getattr(io, "undo_calls", 0) == 0
-    assert io.clipboard == "آخر نسخة"
 
 
 def test_paste_task_skips_restore_when_clipboard_changed(tmp_path, monkeypatch):

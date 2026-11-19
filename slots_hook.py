@@ -38,9 +38,9 @@ WM_QUIT = 0x0012
 LLKHF_UP = 0x80
 LLKHF_INJECTED = 0x10
 
-# أرقام الصف العلوي ولوحة الأرقام كلاهما مقبولة. الصفر يعني "آخر نسخة":
-# Ctrl+V+0 يبقي اللصق الطبيعي كما هو، وCtrl+C+0 لا يحفظ شيئاً.
-DIGIT_VKS = {0x30: 0, 0x60: 0}
+# أرقام الصف العلوي ولوحة الأرقام كلاهما مقبولة: الفتحات 1..9 فقط.
+# Ctrl+V وحده (بلا رقم) يلصق آخر نسخة طبيعياً؛ ولا نختطف الصفر.
+DIGIT_VKS = {}
 for _i in range(1, 10):
     DIGIT_VKS[0x30 + _i] = _i        # '1'..'9'
     DIGIT_VKS[0x60 + _i] = _i        # Numpad1..9
@@ -194,11 +194,9 @@ class SlotChord:
             presses = armed[3] if kind == "paste" else 1
             self._disarm()
             if kind == "capture":
-                if slot:
-                    self.on_capture(slot, before_seq)
-                # الصفر مع C لا يحفظ: "آخر نسخة" تبقى في الكليبورد طبيعياً
+                self.on_capture(slot, before_seq)
             else:
-                self.on_paste(slot, presses)   # slot 0 = اللصق الطبيعي نفسه
+                self.on_paste(slot, presses)
             return "swallow"
         return "pass"
 

@@ -957,10 +957,6 @@ def _run_slot_capture(slot, before_seq):
 
 def _run_slot_paste(slot, presses=1):
     def task():
-        if slot == 0:
-            # الفتحة صفر = آخر نسخة: Ctrl+V الطبيعي لصقها فعلاً، لا نتذكر ولا نتراجع.
-            log.info("slot 0: latest clipboard kept (natural paste)")
-            return
         text = slots_hook.get_slot(slot)
         if not text:
             log.info("slot %d empty: paste skipped", slot)
@@ -1269,7 +1265,7 @@ def run():
 
     _out("شغّال الآن:")
     _out("  * Shift × 2 سريع    -> تحويل التحديد إن وُجد، وإلا آخر كلمة (عربي <-> إنجليزي)")
-    _out("  * Ctrl+C+رقم -> نسخ إلى فتحة | Ctrl+V+0 -> لصق آخر نسخة | Ctrl+V+رقم -> لصق فتحة")
+    _out("  * Ctrl+C+رقم -> نسخ إلى فتحة | Ctrl+V -> لصق آخر نسخة | Ctrl+V+رقم -> لصق فتحة")
     _out("لإنهاء البرنامج: Ctrl+C في هذه النافذة")
     log.info("listeners started")
 
