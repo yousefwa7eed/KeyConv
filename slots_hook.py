@@ -2,13 +2,12 @@
 #
 # الطريقة (مواصفة المستخدم) مع بقاء المفاتيح الطبيعية طبيعية 100%:
 #   Ctrl+C ثم رقم 1..9  -> النسخ العادي يجري كما هو، والرقم يحفظ الحافظة في الفتحة.
-#   Ctrl+V ثم رقم 1..9  -> Ctrl+V يُلصق طبيعياً فوراً (المحتوى الحالي)، فإن وصل
-#                           الرقم خلال مهلة قصيرة تراجعنا عن ذلك اللصق (Ctrl+Z)
-#                           ولصقنا نص الفتحة بدله. بلا رقم = لصق طبيعي خالص.
+#   Ctrl+رقم 1..9 ثم V  -> الرقم يُحتجز، وV يُلصق نص الفتحة بدل الحافظة الحالية.
+#   Ctrl+V وحده         -> لصق طبيعي خالص لآخر نسخة.
 #
 # التنفيذ: خطاف لوحة مفاتيح منخفض المستوى (WH_KEYBOARD_LL) يمرّر كل الأحداث
-# كما هي ويحتجز فقط رقم 1..9 أثناء "التسلح" (بعد C أو V حديثاً مع Ctrl) كي لا
-# يصل إلى التطبيق كاختصار Ctrl+رقم. لا احتجاز ولا إعادة حقن لأي مفتاح آخر.
+# كما هي ويحتجز فقط رقم 1..9 أثناء "التسلح" (بعد C، أو بعد Ctrl+رقم بانتظار V)
+# كي لا يصل إلى التطبيق كاختصار Ctrl+رقم. لا احتجاز ولا إعادة حقن لأي مفتاح آخر.
 # الأحداث المحقونة (منّا أو من أي برنامج) تمر دائماً دون معالجة، فلا حلقات.
 # الميزة قابلة للإيقاف من اللوحة؛ والفتحات مؤقتة: تُمسح عند بدء الخدمة.
 
@@ -46,7 +45,7 @@ for _i in range(1, 10):
     DIGIT_VKS[0x60 + _i] = _i        # Numpad1..9
 
 CAPTURE_WINDOW_S = 0.8        # أقصى فرق بين Ctrl+C والرقم
-PASTE_ARM_S = 0.40            # أقصى فرق بين Ctrl+V والرقم
+SLOT_ARM_S = 1.5              # أقصى انتظار بين Ctrl+رقم وV
 
 
 # ═════════════════════════════════════════════════════════════
@@ -118,12 +117,13 @@ def reset_runtime():
 class SlotChord:
     """تقرر لكل حدث مفتاح: تمرير أو احتجاز، وتُبلغ بالأفعال عبر الندوات.
 
-    المبدأ الثابت: C وV يمرّان دائماً — التطبيق ينفّذ النسخ/اللصق الطبيعي
-    بنفسه، ونحن فقط نراقب هل يتبعها رقم أم لا.
+    المبدأ: C وV يمرّان افتراضياً فينفّذ التطبيق النسخ/اللصق الطبيعي.
+    الاستثناءان: الرقم بعد C (يُحفظ نص النسخة)، وV بعد Ctrl+رقم
+    (يُستبدل اللصق الطبيعي بمحتوى الفتحة).
     """
 
     CAPTURE_WINDOW_S = CAPTURE_WINDOW_S
-    PASTE_ARM_S = PASTE_ARM_S
+    SLOT_ARM_S = SLOT_ARM_S
 
     def __init__(
         self,
@@ -147,8 +147,10 @@ class SlotChord:
             lambda delay, fn: _daemon_timer(delay, fn)
         )
         # armed: ("capture", deadline, before_seq)
-        #        | ("paste", deadline, timer) | None
+        #        | ("slot", deadline, slot, timer) | None
         self.armed = None
+        # بعد لصق فتحة نمنع تكرار V (الاحتفاظ بالزر) من إعادة اللصق
+        self._suppress_v = False
 
     # ── نقطة الدخول ──
     def handle(self, vk, is_down, injected=False):
@@ -165,68 +167,69 @@ class SlotChord:
 
     # ── أحداث النزول ──
     def _on_down(self, vk):
-        armed = self.armed
-        if armed and armed[0] == "paste" and vk not in DIGIT_VKS and vk != VK_V:
-            # مفتاح آخر بدل الرقم: اللصق الطبيعي جرى أصلاً وبقي مكانه
-            self._disarm()
-            return "pass"
+        if vk == VK_V and self._suppress_v:
+            # تكرار تلقائي لـ V بعد لصق الفتحة: نبتلعه حتى تُرفع V
+            return "swallow"
 
         if vk == VK_V:
             if self.ctrl_down() and not self.modifier_down():
                 armed = self.armed
-                if armed and armed[0] == "paste":
-                    # تكرار V أثناء الاحتفاظ بها (auto-repeat): كل تكرار
-                    # يلصق مرة أخرى، فعدّه ليتراجع الرئيس عن كل واحدة.
-                    self._arm_paste(armed[3] + 1)
-                else:
-                    self._arm_paste(1)
-            return "pass"        # اللصق الطبيعي يجري دائماً، لا احتجاز أبداً
+                if armed and armed[0] == "slot":
+                    slot = armed[2]
+                    self._disarm()
+                    self._suppress_v = True
+                    self.on_paste(slot)
+                    return "swallow"
+            return "pass"        # Ctrl+V وحده: لصق طبيعي، لا احتجاز أبداً
 
         if vk == VK_C:
             if self.ctrl_down() and not self.modifier_down():
                 self._arm_capture()
             return "pass"
 
-        if vk in DIGIT_VKS and armed and self.ctrl_down():
-            slot = DIGIT_VKS[vk]
-            kind = armed[0]
-            before_seq = armed[2] if kind == "capture" else None
-            presses = armed[3] if kind == "paste" else 1
-            self._disarm()
-            if kind == "capture":
-                self.on_capture(slot, before_seq)
+        if vk in DIGIT_VKS and self.ctrl_down():
+            armed = self.armed
+            if armed and armed[0] == "capture":
+                self._disarm()
+                self.on_capture(DIGIT_VKS[vk], armed[2])
             else:
-                self.on_paste(slot, presses)
+                # Ctrl+رقم: نحتجز الرقم وننتظر V لاختيار الفتحة
+                self._arm_slot(DIGIT_VKS[vk])
             return "swallow"
+
+        if self.armed and self.armed[0] == "slot":
+            # مفتاح آخر بدل V: ألغِ الاختصار ومرّره طبيعياً
+            self._disarm()
         return "pass"
 
     # ── أحداث الرفع ──
     def _on_up(self, vk):
-        armed = self.armed
-        if armed and vk == VK_CONTROL:
-            # حُرّر Ctrl: أي رقم لاحق يُكتب طبيعياً (لا اختطاف)
+        if vk == VK_CONTROL:
+            # حُرّر Ctrl: أي V لاحق يلصق طبيعياً (لا اختطاف)
             self._disarm()
+        if vk == VK_V and self._suppress_v:
+            self._suppress_v = False
+            return "swallow"     # نبتلع رفع V أيضاً حتى لا يراه التطبيق وحيداً
         return "pass"
 
     # ── التسلح ──
-    def _arm_paste(self, presses=1):
+    def _arm_slot(self, slot):
         self._disarm()
-        timer = self._make_timer(self.PASTE_ARM_S, self._paste_deadline)
-        # الـ presses: عدد ضغطات V (الأصلية + التكرار التلقائي) حتى الآن،
-        # فكل واحدة تلصق مرة وتحتاج تراجعاً واحداً.
-        self.armed = ("paste", self.now() + self.PASTE_ARM_S, timer, presses)
+        timer = self._make_timer(self.SLOT_ARM_S, self._slot_deadline)
+        self.armed = ("slot", self.now() + self.SLOT_ARM_S, slot, timer)
 
     def _arm_capture(self):
         # نقيس رقم الحافظة "قبل" أول ضغطة C: التطبيق ينسخ فوراً عند Ctrl+C،
         # أي قبل وصول الرقم، فمقارنة ما بعدها تكشف نجاح النسخ فعلاً.
         # ضغطة C ثانية أثناء التسلح لا تعيد القياس: الرقم الأصلي هو الأساس،
-        # وإلا بدا النسخ "بلا تغيير" بعد أن غيّره بالفعل (فتات الفتحة).
+        # وإلا بدا النسخ "بلا تغيير" بعد أن غيّره بالفعل (فات الفتحة).
         armed = self.armed
         before = armed[2] if armed and armed[0] == "capture" else self.seq()
+        self._disarm()
         self.armed = ("capture", self.now() + self.CAPTURE_WINDOW_S, before)
 
-    def _paste_deadline(self):
-        """انتهت مهلة الرقم بلا رقم: بقي اللصق الطبيعي كما هو، لا شيء آخر."""
+    def _slot_deadline(self):
+        """انتهت مهلة Ctrl+رقم بلا V: لا لصق فتحة، ويبقى كل شيء طبيعياً."""
         self.armed = None
 
     def _expire_if_due(self):
@@ -239,9 +242,9 @@ class SlotChord:
     def _disarm(self):
         armed = self.armed
         self.armed = None
-        if armed and armed[0] == "paste":
+        if armed and armed[0] == "slot":
             try:
-                armed[2].cancel()
+                armed[3].cancel()
             except Exception:
                 pass
 

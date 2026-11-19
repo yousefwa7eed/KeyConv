@@ -1,8 +1,8 @@
-# tests/test_slots_hook.py — الحافظة متعددة الفتحات (Ctrl+C+رقم / Ctrl+V+رقم).
+# tests/test_slots_hook.py — الحافظة متعددة الفتحات (Ctrl+C+رقم / Ctrl+رقم+V).
 #
-# يغطي: آلة القرار (SlotChord) بلا ويندوز: التسلح بعد C وV، احتجاز الأرقام،
-# إعادة حقن V للصق العادي، انتهاء المهل، تجاهل الأحداث المحقونة والتركيبات
-# مع Alt/Win، ومخزن الفتحات المؤقت وملف العرض.
+# يغطي: آلة القرار (SlotChord) بلا ويندوز: التسلح بعد C وبعد Ctrl+رقم،
+# احتجاز الرقم وV عند اختيار فتحة، بقاء Ctrl+V لصقاً طبيعياً، انتهاء المهل،
+# تجاهل الأحداث المحقونة والتركيبات مع Alt/Win، ومخزن الفتحات المؤقت وملف العرض.
 
 import json
 
@@ -63,7 +63,7 @@ def chord_env():
 
     chord = SlotChord(
         on_capture=lambda slot, before_seq: events.append(("capture", slot, before_seq)),
-        on_paste=lambda slot, presses=1: events.append(("paste", slot, presses)),
+        on_paste=lambda slot: events.append(("paste", slot)),
         enabled=lambda: env.enabled,
         ctrl_down=lambda: env.ctrl,
         modifier_down=lambda: env.mod,
@@ -102,13 +102,17 @@ def test_capture_all_slots_in_sequence(chord_env):
     assert [e[1] for e in events] == [1, 3]
 
 
-def test_capture_window_expiry(chord_env):
+def test_capture_window_expiry_then_digit_arms_slot(chord_env):
+    """فات وقت النسخ: الرقم لم يعد يحفظ، لكنه يصلح لتسلح لصق فتحة."""
     chord, env, events, _sent, _timers = chord_env
     env.ctrl = True
     down(chord, VK_C)
     env.t = SlotChord.CAPTURE_WINDOW_S + 0.1
-    assert down(chord, VK_1) == "pass"             # فات الأوان: رقم عادي
-    assert events == []
+    assert down(chord, VK_1) == "swallow"
+    assert events == []                            # لا حفظ
+    assert chord.armed is not None                 # بل انتظار V
+    assert down(chord, VK_V) == "swallow"
+    assert events == [("paste", 1)]
 
 
 def test_capture_cancelled_when_ctrl_released(chord_env):
@@ -162,68 +166,100 @@ def test_zero_is_not_a_slot_chord(chord_env):
     assert events == []
 
 
-# ── لصق فتحة: Ctrl+V يمر طبيعياً ثم الرقم يستبدل اللصق ──────
-def test_paste_v_passes_naturally_and_digit_swallowed(chord_env):
-    chord, env, events, sent, _timers = chord_env
+# ── لصق فتحة: Ctrl+رقم يُحجز، ثم V يلصق نص الفتحة ──────────
+def test_ctrl_digit_then_v_pastes_slot(chord_env):
+    chord, env, events, sent, timers = chord_env
     env.ctrl = True
-    assert down(chord, VK_V) == "pass"             # اللصق الطبيعي يجري فوراً
-    assert up(chord, VK_V) == "pass"
-    assert down(chord, VK_2) == "swallow"          # الرقم فقط يُحتجز
-    assert events == [("paste", 2, 1)]
-    assert _timers[0].cancelled is True            # مؤقّت التسلح أُلغي
+    assert down(chord, VK_2) == "swallow"          # Ctrl+2 محجوز للفتحة
+    assert up(chord, VK_2) == "pass"
+    assert events == []                            # لم يحدث لصق بعد
+    assert chord.armed is not None
+    assert down(chord, VK_V) == "swallow"          # V بدل اللصق الطبيعي
+    assert up(chord, VK_V) == "swallow"            # ورفعها محجوز أيضاً
+    assert events == [("paste", 2)]
+    assert chord.armed is None
+    assert timers[0].cancelled is True             # مؤقّت الانتظار أُلغي
     assert sent == []                              # لا إعادة حقن إطلاقاً
 
 
-def test_paste_without_digit_is_purely_natural(chord_env):
+def test_ctrl_v_alone_is_purely_natural(chord_env):
     chord, env, events, sent, timers = chord_env
     env.ctrl = True
-    down(chord, VK_V)
-    timers[0].fn()                                 # انتهت المهلة بلا رقم
+    assert down(chord, VK_V) == "pass"             # اللصق الطبيعي يجري فوراً
+    assert up(chord, VK_V) == "pass"
     assert chord.armed is None
-    assert sent == [] and events == []
+    assert events == [] and sent == []
+    assert timers == []                            # لا مؤقّتات إطلاقاً
+
+
+def test_ctrl_digit_without_v_expires_silently(chord_env):
+    """Ctrl+رقم ثم لا شيء: الرقم حُجز لحظياً ثم عاد كل شيء طبيعياً."""
+    chord, env, events, sent, timers = chord_env
+    env.ctrl = True
+    assert down(chord, VK_1) == "swallow"
+    timers[0].fn()                                 # انتهت مهلة الانتظار
+    assert chord.armed is None
+    assert events == [] and sent == []
     env.ctrl = False
-    assert down(chord, VK_1) == "pass"             # يُكتب طبيعياً
+    assert down(chord, VK_1) == "pass"             # بعدها رقم عادي
 
 
-def test_paste_arm_ends_silently_on_ctrl_release(chord_env):
-    chord, env, events, sent, _timers = chord_env
+def test_slot_arm_ends_silently_on_ctrl_release(chord_env):
+    chord, env, events, sent, timers = chord_env
     env.ctrl = True
-    down(chord, VK_V)
-    up(chord, VK_CONTROL)                          # حُرر Ctrl بلا رقم
+    down(chord, VK_2)
+    up(chord, VK_CONTROL)                          # حُرر Ctrl قبل V
     assert chord.armed is None
-    assert sent == [] and events == []             # اللصق الطبيعي بقي مكانه
+    assert timers[0].cancelled is True
+    assert events == [] and sent == []
     env.ctrl = False
-    assert down(chord, VK_1) == "pass"
+    assert down(chord, VK_V) == "pass"             # v عادي
 
 
-def test_paste_arm_ends_silently_on_other_key(chord_env):
-    chord, env, events, sent, _timers = chord_env
+def test_slot_arm_ends_silently_on_other_key(chord_env):
+    chord, env, events, sent, timers = chord_env
     env.ctrl = True
-    down(chord, VK_V)
-    assert down(chord, VK_X) == "pass"             # مفتاح آخر بدل الرقم
+    down(chord, VK_2)
+    assert down(chord, VK_X) == "pass"             # مفتاح آخر بدل V
     assert chord.armed is None
-    assert sent == [] and events == []
-
-
-def test_paste_window_expiry_passes_digit(chord_env):
-    chord, env, events, sent, _timers = chord_env
-    env.ctrl = True
-    down(chord, VK_V)
-    env.t = SlotChord.PASTE_ARM_S + 0.05
-    assert down(chord, VK_1) == "pass"             # فاتت المهلة: اختصار تطبيق
+    assert timers[0].cancelled is True
     assert events == [] and sent == []
 
 
-def test_double_v_re_arms_with_fresh_timer(chord_env):
-    chord, env, events, _sent, timers = chord_env
+def test_slot_arm_window_expiry_passes_v(chord_env):
+    chord, env, events, sent, _timers = chord_env
     env.ctrl = True
-    down(chord, VK_V)
-    down(chord, VK_V)                              # تكرار V (auto-repeat)
-    assert len(timers) == 2
-    assert timers[0].cancelled is True             # المؤقّت الأول أُلغي
-    assert chord.armed is not None
+    down(chord, VK_2)
+    env.t = SlotChord.SLOT_ARM_S + 0.05
+    assert down(chord, VK_V) == "pass"             # فاتت المهلة: لصق طبيعي
+    assert events == [] and sent == []
+
+
+def test_v_repeat_after_slot_paste_is_suppressed(chord_env):
+    """الاحتفاظ بـ V بعد لصق الفتحة لا يلصق النص مرات عديدة."""
+    chord, env, events, _sent, _timers = chord_env
+    env.ctrl = True
     down(chord, VK_3)
-    assert events == [("paste", 3, 2)]             # ضغطتان -> تراجعان
+    assert down(chord, VK_V) == "swallow"          # اللصقة الأولى
+    assert down(chord, VK_V) == "swallow"          # تكرار تلقائي
+    assert down(chord, VK_V) == "swallow"
+    assert up(chord, VK_V) == "swallow"            # الرفع يُبتلع
+    assert events == [("paste", 3)]                # لصقة واحدة فقط
+
+    env.ctrl = False
+    assert down(chord, VK_V) == "pass"             # بعد الرفع: v عادي
+    up(chord, VK_V)
+
+
+def test_capture_digit_replaces_slot_arm(chord_env):
+    """Ctrl+C ثم رقم = حفظ، وليس تسلح لصق (لا V اختياري بعده)."""
+    chord, env, events, _sent, _timers = chord_env
+    env.ctrl = True
+    down(chord, VK_C)
+    assert down(chord, VK_2) == "swallow"
+    assert events == [("capture", 2, 100)]
+    assert chord.armed is None
+    assert down(chord, VK_V) == "pass"             # V هنا لصق طبيعي
 
 
 def test_numpad_digits_work(chord_env):
@@ -233,16 +269,19 @@ def test_numpad_digits_work(chord_env):
     assert down(chord, VK_NUMPAD5) == "swallow"
     assert events == [("capture", 5, 100)]
 
+    assert down(chord, VK_NUMPAD5) == "swallow"    # Ctrl+Numpad5: تسلح فتحة
+    assert down(chord, VK_V) == "swallow"
+    assert events == [("capture", 5, 100), ("paste", 5)]
 
-def test_zero_after_paste_is_plain_text(chord_env):
-    """Ctrl+V ثم 0: الصفر يُكتب طبيعياً؛ اللصق الطبيعي جرى بالفعل."""
-    chord, env, events, sent, timers = chord_env
+
+def test_zero_after_ctrl_is_plain(chord_env):
+    """الصفر ليس فتحة: Ctrl+0 يمر طبيعياً، ولا يلصق شيئاً."""
+    chord, env, events, sent, _timers = chord_env
     env.ctrl = True
-    down(chord, VK_V)
     assert down(chord, VK_0) == "pass"
-    assert events == []
-    assert sent == []                          # لا إعادة حقن ولا تراجع
-    assert timers[0].cancelled is True         # التسلح انتهى بمفتاح آخر
+    assert chord.armed is None
+    assert down(chord, VK_V) == "pass"
+    assert events == [] and sent == []
 
 
 # ── حالات لا يجوز أن تتأثر ──────────────────────────────────
@@ -292,11 +331,13 @@ def test_ctrl_up_without_arm_is_untouched(chord_env):
     assert sent == []
 
 
-def test_paste_arm_requires_ctrl(chord_env):
+def test_slot_chord_requires_ctrl(chord_env):
     chord, env, events, _sent, _timers = chord_env
     env.ctrl = False
     assert down(chord, VK_V) == "pass"
+    assert down(chord, VK_2) == "pass"             # رقم عادي بلا Ctrl
     assert chord.armed is None
+    assert events == []
 
 
 # ── مخزن الفتحات المؤقت وملف العرض ──────────────────────────
@@ -431,7 +472,6 @@ def test_paste_task_skips_restore_when_clipboard_changed(tmp_path, monkeypatch):
     io = CopyingIO()
     io.clipboard = "الحالي"
     monkeypatch.setattr(main, "IO", io)
-    monkeypatch.setattr(main, "_wait_v_released", lambda *a, **k: True)
     monkeypatch.setattr(slots_hook, "slots_file_path", lambda: str(tmp_path / "s.json"))
     slots_hook.reset_runtime()
     slots_hook.save_slot(1, "نص الفتحة")
@@ -449,7 +489,6 @@ def test_paste_task_restores_clipboard(tmp_path, monkeypatch):
     io = FakeIO()
     io.clipboard = "الحالي"
     monkeypatch.setattr(main, "IO", io)
-    monkeypatch.setattr(main, "_wait_v_released", lambda *a, **k: True)
     monkeypatch.setattr(slots_hook, "slots_file_path", lambda: str(tmp_path / "s.json"))
     monkeypatch.setattr(main, "sleep_fn", lambda _s: None)
     slots_hook.reset_runtime()
@@ -457,32 +496,10 @@ def test_paste_task_restores_clipboard(tmp_path, monkeypatch):
 
     main._run_slot_paste(1)
     main.flush_actions(2.0)
-    assert io.undo_calls == 1                      # تراجع عن اللصق الطبيعي أولاً
-    assert io.paste_calls == 1
+    assert io.paste_calls == 1                     # لصقة واحدة فقط
     assert io.clipboard_sets == ["نص الفتحة"]
     assert io.clipboard == "الحالي"                # الحافظة أُعيدت كما كانت
 
     main._run_slot_paste(9)                        # فتحة فارغة: لا شيء
     main.flush_actions(2.0)
     assert io.paste_calls == 1
-    assert io.undo_calls == 1
-
-
-def test_paste_task_undoes_every_v_press(tmp_path, monkeypatch):
-    """تكرار Ctrl+V أثناء الاحتفاظ يلصق عدة مرات: تراجع لكل ضغطة."""
-    import main
-    from test_pipeline import FakeIO
-
-    io = FakeIO()
-    monkeypatch.setattr(main, "IO", io)
-    monkeypatch.setattr(main, "_wait_v_released", lambda *a, **k: True)
-    monkeypatch.setattr(slots_hook, "slots_file_path", lambda: str(tmp_path / "s.json"))
-    monkeypatch.setattr(main, "sleep_fn", lambda _s: None)
-    slots_hook.reset_runtime()
-    slots_hook.save_slot(2, "بيانات")
-
-    main._run_slot_paste(2, presses=3)             # V تكررت 3 مرات
-    main.flush_actions(2.0)
-    assert io.undo_calls == 3                      # تراجع عن الألصاق الثلاثة
-    assert io.paste_calls == 1
-    assert io.clipboard_sets == ["بيانات"]

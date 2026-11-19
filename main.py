@@ -440,6 +440,14 @@ def _send_unicode_text(text):
         log.warning("unicode SendInput incomplete: %s/%s", sent, len(events))
 
 
+def _ctrl_pressed():
+    """هل Ctrl مضغوط الآن فيزيائياً؟ (يلزم لاختيار صيغة لصق الفتحة)"""
+    try:
+        return bool(ctypes.windll.user32.GetAsyncKeyState(0x11) & 0x8000)
+    except Exception:
+        return False
+
+
 class RealIO:
     """الواجهة الفعلية لإرسال الضغطات وقراءة/كتابة الكليبورد."""
 
@@ -455,6 +463,12 @@ class RealIO:
 
     def send_paste(self):
         c = self.controller
+        if _ctrl_pressed():
+            # المستخدم ماسك Ctrl ضمن Ctrl+رقم+V: نرسل V وحدها كي لا
+            # يرفع حقننا Ctrl الأصلي قبل أن يقرأ التطبيق اللصق.
+            c.press("v")
+            c.release("v")
+            return
         c.press(Key.ctrl)
         c.press("v")
         c.release("v")
@@ -871,25 +885,6 @@ SLOT_CAPTURE_TRIES = max(1, int(round(SLOT_CAPTURE_WAIT_S / SLOT_CAPTURE_POLL_S)
 SLOT_PASTE_DELAY_S = 0.60      # مهلة أطول من الرقصة: تطبيقات إلكترون تقرأ
                                # الحافظة متأخراً (IPC)، خصوصاً مع نصوص كبيرة،
                                # فلا نسترجع الأصل قبل أن يلتصق النص فعلاً.
-SLOT_UNDO_DELAY_S = 0.12       # مهلة معالجة التطبيق لكل تراجع
-SLOT_V_RELEASE_TIMEOUT_S = 0.60  # أقصى انتظار لتحرير V قبل بدء التراجع
-
-
-def _wait_v_released(timeout=SLOT_V_RELEASE_TIMEOUT_S):
-    """انتظر حتى يترك المستخدم V فعلياً.
-
-    السبب: التكرار التلقائي أثناء الاحتفاظ بـ Ctrl+V يلصق أكثر من مرة،
-    والتراجع قبل اكتمال لصق التطبيق (IPC في تطبيقات إلكترون) لا يلغي شيئاً —
-    فيبقى النص الخاطئ ويُلصق نص الفتحة بعده. الانتظار هنا يجعل التراجع
-    يصل بعد استقرار كل الألصاق.
-    """
-    user32 = ctypes.windll.user32
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not (user32.GetAsyncKeyState(slots_hook.VK_V) & 0x8000):
-            return True
-        sleep_fn(0.02)
-    return False
 
 _slots_stop = None
 _slots_lock = threading.Lock()
@@ -955,7 +950,7 @@ def _run_slot_capture(slot, before_seq):
         log.error("slot capture could not be queued")
 
 
-def _run_slot_paste(slot, presses=1):
+def _run_slot_paste(slot):
     def task():
         text = slots_hook.get_slot(slot)
         if not text:
@@ -965,21 +960,12 @@ def _run_slot_paste(slot, presses=1):
         snap = None
         original_text = None
         try:
-            original_text = IO.clipboard_get()
-        except Exception:
-            original_text = None
-        try:
-            # Ctrl+V الطبيعي لصق المحتوى الحالي فوراً (نحن لم نحتجزه أبداً)؛
-            # الرقم وصل بعده، فننتظر تحرير V (اكتمال كل الألصاق) ثم نتراجع
-            # عن كل ضغطة V واحدة واحدة حتى يختفي النص الخاطئ كلياً،
-            # ثم نلصق نص الفتحة بدله.
-            _wait_v_released()
-            sleep_fn(0.05)
-            count = max(1, int(presses))
-            for _ in range(count):
-                IO.send_undo()
-                sleep_fn(SLOT_UNDO_DELAY_S)
-            log.info("slot %d undo sent x%d", slot, count)
+            # Ctrl+رقم احتجز الرقم، ولم يصل V للتطبيق: لا لصق طبيعي سابق
+            # نحتاج التراجع عنه. نضع نص الفتحة مؤقتاً ونلصق، ثم نرجع الكليبورد.
+            try:
+                original_text = IO.clipboard_get()
+            except Exception:
+                original_text = None
             snap = _safe_snapshot(IO)
             IO.clipboard_set(text)
             IO.send_paste()
@@ -1265,7 +1251,7 @@ def run():
 
     _out("شغّال الآن:")
     _out("  * Shift × 2 سريع    -> تحويل التحديد إن وُجد، وإلا آخر كلمة (عربي <-> إنجليزي)")
-    _out("  * Ctrl+C+رقم -> نسخ إلى فتحة | Ctrl+V -> لصق آخر نسخة | Ctrl+V+رقم -> لصق فتحة")
+    _out("  * Ctrl+C+رقم -> نسخ إلى فتحة | Ctrl+V -> لصق آخر نسخة | Ctrl+رقم+V -> لصق فتحة")
     _out("لإنهاء البرنامج: Ctrl+C في هذه النافذة")
     log.info("listeners started")
 

@@ -342,7 +342,7 @@ class Panel:
 
         self._switch_row(
             card.body, self.slots_var, "الحافظة متعددة الفتحات",
-            "Ctrl+C+رقم للنسخ إلى فتحة، Ctrl+V لآخر نسخة، Ctrl+V+رقم للصق فتحة",
+            "Ctrl+C+رقم للنسخ إلى فتحة، Ctrl+V لآخر نسخة، Ctrl+رقم+V للصق فتحة",
             self._on_slots,
         )
         self._slots_viewer_row(card.body)
