@@ -2,7 +2,8 @@
 #
 # الطريقة (مواصفة المستخدم) مع بقاء المفاتيح الطبيعية طبيعية 100%:
 #   Ctrl+C ثم رقم 1..9  -> النسخ العادي يجري كما هو، والرقم يحفظ الحافظة في الفتحة.
-#   Ctrl+رقم 1..9 ثم V  -> الرقم يُحتجز، وV يُلصق نص الفتحة بدل الحافظة الحالية.
+#   Ctrl+رقم 1..9 ثم V  -> الرقم يُحتجز، وعند V تُجهَّز الحافظة بنص الفتحة
+#                           قبل وصول الضغطة للتطبيق فيلصقها هو طبيعياً (بلا حقن).
 #   Ctrl+V وحده         -> لصق طبيعي خالص لآخر نسخة.
 #
 # التنفيذ: خطاف لوحة مفاتيح منخفض المستوى (WH_KEYBOARD_LL) يمرّر كل الأحداث
@@ -119,7 +120,7 @@ class SlotChord:
 
     المبدأ: C وV يمرّان افتراضياً فينفّذ التطبيق النسخ/اللصق الطبيعي.
     الاستثناءان: الرقم بعد C (يُحفظ نص النسخة)، وV بعد Ctrl+رقم
-    (يُستبدل اللصق الطبيعي بمحتوى الفتحة).
+    (يُجهَّز نص الفتحة في الحافظة قبل وصول V، فتلصقه هي طبيعياً).
     """
 
     CAPTURE_WINDOW_S = CAPTURE_WINDOW_S
@@ -137,7 +138,7 @@ class SlotChord:
         arm_timer=None,
     ):
         self.on_capture = on_capture     # (slot, before_seq)
-        self.on_paste = on_paste         # (slot,)
+        self.on_paste = on_paste         # (slot,) -> هل جُهزت الحافظة؟
         self.enabled = enabled
         self.ctrl_down = ctrl_down
         self.modifier_down = modifier_down
@@ -149,8 +150,10 @@ class SlotChord:
         # armed: ("capture", deadline, before_seq)
         #        | ("slot", deadline, slot, timer) | None
         self.armed = None
-        # بعد لصق فتحة نمنع تكرار V (الاحتفاظ بالزر) من إعادة اللصق
-        self._suppress_v = False
+        # بعد تمرير V تلصق الفتحة: نبتلع تكرارها التلقائي (down فقط)
+        self._v_repeat = False
+        # فشل تجهيز الحافظة: نبتلع V كاملة كي لا يُلصق نص قديم
+        self._v_swallow_up = False
 
     # ── نقطة الدخول ──
     def handle(self, vk, is_down, injected=False):
@@ -167,8 +170,8 @@ class SlotChord:
 
     # ── أحداث النزول ──
     def _on_down(self, vk):
-        if vk == VK_V and self._suppress_v:
-            # تكرار تلقائي لـ V بعد لصق الفتحة: نبتلعه حتى تُرفع V
+        if vk == VK_V and (self._v_repeat or self._v_swallow_up):
+            # تكرار تلقائي بعد أول V: يُبتلع حتى تُرفع V
             return "swallow"
 
         if vk == VK_V:
@@ -177,8 +180,17 @@ class SlotChord:
                 if armed and armed[0] == "slot":
                     slot = armed[2]
                     self._disarm()
-                    self._suppress_v = True
-                    self.on_paste(slot)
+                    try:
+                        ready = bool(self.on_paste(slot))
+                    except Exception:
+                        log.exception("slot paste preparation failed")
+                        ready = False
+                    if ready:
+                        # الحافظة جُهزت الآن؛ نمرر V ليُلصقه التطبيق طبيعياً
+                        self._v_repeat = True
+                        return "pass"
+                    # فتحة فارغة أو تعذّر التجهيز: نمنع لصق نص قديم
+                    self._v_swallow_up = True
                     return "swallow"
             return "pass"        # Ctrl+V وحده: لصق طبيعي، لا احتجاز أبداً
 
@@ -207,9 +219,11 @@ class SlotChord:
         if vk == VK_CONTROL:
             # حُرّر Ctrl: أي V لاحق يلصق طبيعياً (لا اختطاف)
             self._disarm()
-        if vk == VK_V and self._suppress_v:
-            self._suppress_v = False
-            return "swallow"     # نبتلع رفع V أيضاً حتى لا يراه التطبيق وحيداً
+        if vk == VK_V:
+            if self._v_swallow_up:
+                self._v_swallow_up = False
+                return "swallow"     # نبتلع رفع V أيضاً: التطبيق لم يرَ ضغطتها
+            self._v_repeat = False   # الرفع يمر ليوازن الضغطة الممررة
         return "pass"
 
     # ── التسلح ──

@@ -440,14 +440,6 @@ def _send_unicode_text(text):
         log.warning("unicode SendInput incomplete: %s/%s", sent, len(events))
 
 
-def _ctrl_pressed():
-    """هل Ctrl مضغوط الآن فيزيائياً؟ (يلزم لاختيار صيغة لصق الفتحة)"""
-    try:
-        return bool(ctypes.windll.user32.GetAsyncKeyState(0x11) & 0x8000)
-    except Exception:
-        return False
-
-
 class RealIO:
     """الواجهة الفعلية لإرسال الضغطات وقراءة/كتابة الكليبورد."""
 
@@ -463,12 +455,6 @@ class RealIO:
 
     def send_paste(self):
         c = self.controller
-        if _ctrl_pressed():
-            # المستخدم ماسك Ctrl ضمن Ctrl+رقم+V: نرسل V وحدها كي لا
-            # يرفع حقننا Ctrl الأصلي قبل أن يقرأ التطبيق اللصق.
-            c.press("v")
-            c.release("v")
-            return
         c.press(Key.ctrl)
         c.press("v")
         c.release("v")
@@ -903,7 +889,7 @@ def _update_slots_hook():
             try:
                 _slots_stop = slots_hook.start(
                     _run_slot_capture,
-                    _run_slot_paste,
+                    _prepare_slot_paste,
                 )[1]
                 log.info("slots hook started")
             except BaseException:
@@ -950,39 +936,56 @@ def _run_slot_capture(slot, before_seq):
         log.error("slot capture could not be queued")
 
 
-def _run_slot_paste(slot):
-    def task():
-        text = slots_hook.get_slot(slot)
-        if not text:
-            log.info("slot %d empty: paste skipped", slot)
-            return
-        guard.begin()
-        snap = None
+def _prepare_slot_paste(slot):
+    """يُستدعى في خيط الخطاف عند V: يضع نص الفتحة في الحافظة فوراً.
+
+    الترتيب هو كل شيء: الكتابة تسبق إعادة V للتطبيق، فيقرأ هو النص الجديد
+    ويلصقه لصقاً طبيعياً — لا حقن ولا تراجع.
+    """
+    text = slots_hook.get_slot(slot)
+    if not text:
+        log.info("slot %d empty: paste skipped", slot)
+        return False
+    try:
+        original_text = IO.clipboard_get()
+    except Exception:
         original_text = None
-        try:
-            # Ctrl+رقم احتجز الرقم، ولم يصل V للتطبيق: لا لصق طبيعي سابق
-            # نحتاج التراجع عنه. نضع نص الفتحة مؤقتاً ونلصق، ثم نرجع الكليبورد.
-            try:
-                original_text = IO.clipboard_get()
-            except Exception:
-                original_text = None
-            snap = _safe_snapshot(IO)
-            IO.clipboard_set(text)
-            IO.send_paste()
-            sleep_fn(SLOT_PASTE_DELAY_S)
-            apply_layout_switch(text, "slot")
-            log.info(
-                "slot %d pasted: %d chars fg=%s",
-                slot, len(text), _foreground_label(),
-            )
-        except BaseException:
-            log.exception("slot paste failed")
-        finally:
-            # لا نطمس نسخاً جديداً نسخه المستخدم في هذه الأثناء
-            _restore_if_unchanged(IO, snap, original_text, text)
-            guard.finish()
-    if not _submit_action(task):
-        log.error("slot paste could not be queued")
+    snap = _safe_snapshot(IO)
+    try:
+        IO.clipboard_set(text)
+    except Exception:
+        log.exception("slot %d clipboard write failed", slot)
+        return False
+    try:
+        written = IO.clipboard_get()
+    except Exception:
+        written = None
+    if written is not None and written != text:
+        log.warning(
+            "slot %d clipboard mismatch: wrote %d, read %d",
+            slot, len(text), len(written),
+        )
+        return False
+    if not _submit_action(
+        lambda: _finish_slot_paste(slot, text, snap, original_text)
+    ):
+        log.error("slot paste cleanup could not be queued")
+    log.info(
+        "slot %d prepared for natural paste fg=%s",
+        slot, _foreground_label(),
+    )
+    return True
+
+
+def _finish_slot_paste(slot, text, snap, original_text):
+    try:
+        sleep_fn(SLOT_PASTE_DELAY_S)
+        apply_layout_switch(text, "slot")
+    except BaseException:
+        log.exception("slot paste finish failed")
+    finally:
+        # لا نطمس نسخاً جديداً نسخه المستخدم في هذه الأثناء
+        _restore_if_unchanged(IO, snap, original_text, text)
 
 
 # ═══════════════════════════════════════════════════════════════

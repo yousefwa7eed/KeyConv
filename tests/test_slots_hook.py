@@ -18,6 +18,7 @@ VK_0 = 0x30
 VK_1 = 0x31
 VK_2 = 0x32
 VK_3 = 0x33
+VK_4 = 0x34
 VK_5 = 0x35
 VK_9 = 0x39
 VK_NUMPAD5 = 0x65
@@ -47,6 +48,7 @@ class Env:
         self.mod = False
         self.t = 0.0
         self.seq = 100
+        self.paste_ready = True     # هل نجح تجهيز الحافظة لنص الفتحة؟
 
 
 @pytest.fixture()
@@ -61,9 +63,13 @@ def chord_env():
         timers.append(timer)
         return timer
 
+    def on_paste(slot):
+        events.append(("paste", slot))
+        return env.paste_ready
+
     chord = SlotChord(
         on_capture=lambda slot, before_seq: events.append(("capture", slot, before_seq)),
-        on_paste=lambda slot: events.append(("paste", slot)),
+        on_paste=on_paste,
         enabled=lambda: env.enabled,
         ctrl_down=lambda: env.ctrl,
         modifier_down=lambda: env.mod,
@@ -111,7 +117,7 @@ def test_capture_window_expiry_then_digit_arms_slot(chord_env):
     assert down(chord, VK_1) == "swallow"
     assert events == []                            # لا حفظ
     assert chord.armed is not None                 # بل انتظار V
-    assert down(chord, VK_V) == "swallow"
+    assert down(chord, VK_V) == "pass"
     assert events == [("paste", 1)]
 
 
@@ -166,7 +172,7 @@ def test_zero_is_not_a_slot_chord(chord_env):
     assert events == []
 
 
-# ── لصق فتحة: Ctrl+رقم يُحجز، ثم V يلصق نص الفتحة ──────────
+# ── لصق فتحة: Ctrl+رقم يُحجز، ثم V تلصق بعد تجهيز الحافظة ──
 def test_ctrl_digit_then_v_pastes_slot(chord_env):
     chord, env, events, sent, timers = chord_env
     env.ctrl = True
@@ -174,12 +180,12 @@ def test_ctrl_digit_then_v_pastes_slot(chord_env):
     assert up(chord, VK_2) == "pass"
     assert events == []                            # لم يحدث لصق بعد
     assert chord.armed is not None
-    assert down(chord, VK_V) == "swallow"          # V بدل اللصق الطبيعي
-    assert up(chord, VK_V) == "swallow"            # ورفعها محجوز أيضاً
+    assert down(chord, VK_V) == "pass"             # تمر بعد تجهيز الحافظة
+    assert up(chord, VK_V) == "pass"
     assert events == [("paste", 2)]
     assert chord.armed is None
     assert timers[0].cancelled is True             # مؤقّت الانتظار أُلغي
-    assert sent == []                              # لا إعادة حقن إطلاقاً
+    assert sent == []                              # التطبيق يلصق بنفسه
 
 
 def test_ctrl_v_alone_is_purely_natural(chord_env):
@@ -236,19 +242,32 @@ def test_slot_arm_window_expiry_passes_v(chord_env):
 
 
 def test_v_repeat_after_slot_paste_is_suppressed(chord_env):
-    """الاحتفاظ بـ V بعد لصق الفتحة لا يلصق النص مرات عديدة."""
+    """الاحتفاظ بـ V بعد تجهيز الفتحة لا يلصق النص مرات عديدة."""
     chord, env, events, _sent, _timers = chord_env
     env.ctrl = True
     down(chord, VK_3)
-    assert down(chord, VK_V) == "swallow"          # اللصقة الأولى
+    assert down(chord, VK_V) == "pass"             # الضغطة الأصلية تلصق
     assert down(chord, VK_V) == "swallow"          # تكرار تلقائي
     assert down(chord, VK_V) == "swallow"
-    assert up(chord, VK_V) == "swallow"            # الرفع يُبتلع
-    assert events == [("paste", 3)]                # لصقة واحدة فقط
+    assert up(chord, VK_V) == "pass"               # الرفع يمر ليوازن الضغطة
+    assert events == [("paste", 3)]                # تجهيز واحد فقط
 
     env.ctrl = False
     assert down(chord, VK_V) == "pass"             # بعد الرفع: v عادي
     up(chord, VK_V)
+
+
+def test_v_swallowed_when_slot_is_empty_or_prepare_failed(chord_env):
+    """فتحة فارغة/فشل تجهيز: V تُبتلع كاملة فلا يُلصق نص قديم."""
+    chord, env, events, _sent, _timers = chord_env
+    env.ctrl = True
+    env.paste_ready = False
+    down(chord, VK_4)
+    assert down(chord, VK_V) == "swallow"
+    assert down(chord, VK_V) == "swallow"          # تكرار تلقائي يُبتلع أيضاً
+    assert up(chord, VK_V) == "swallow"
+    assert events == [("paste", 4)]
+    assert down(chord, VK_V) == "pass"             # محاولة V جديدة عادية
 
 
 def test_capture_digit_replaces_slot_arm(chord_env):
@@ -270,7 +289,8 @@ def test_numpad_digits_work(chord_env):
     assert events == [("capture", 5, 100)]
 
     assert down(chord, VK_NUMPAD5) == "swallow"    # Ctrl+Numpad5: تسلح فتحة
-    assert down(chord, VK_V) == "swallow"
+    assert down(chord, VK_V) == "pass"
+    assert up(chord, VK_V) == "pass"
     assert events == [("capture", 5, 100), ("paste", 5)]
 
 
@@ -382,7 +402,7 @@ def test_main_has_slot_handlers_and_feature_key():
     import main
     assert "slots_enabled" in main.FEATURE_NAMES
     assert callable(main._run_slot_capture)
-    assert callable(main._run_slot_paste)
+    assert callable(main._prepare_slot_paste)
     assert settings_defaults_has_slots()
 
 
@@ -459,47 +479,53 @@ def test_capture_never_overwrites_slot_with_empty_text(tmp_path, monkeypatch):
     assert slots_hook.get_slot(3) == "قيمة قديمة"
 
 
-def test_paste_task_skips_restore_when_clipboard_changed(tmp_path, monkeypatch):
-    """نسخ جديد من المستخدم أثناء اللصق لا يُطمس بالاسترجاع."""
-    import main
-    from test_pipeline import FakeIO
+def test_prepare_paste_skips_restore_when_clipboard_changed(tmp_path, monkeypatch):
+    """نسخ جديد من المستخدم بعد التجهيز لا يُطمس بالاسترجاع."""
+    import threading
 
-    class CopyingIO(FakeIO):
-        def send_paste(self):
-            self.paste_calls += 1
-            self.clipboard = "نسخ جديد من المستخدم"
-
-    io = CopyingIO()
-    io.clipboard = "الحالي"
-    monkeypatch.setattr(main, "IO", io)
-    monkeypatch.setattr(slots_hook, "slots_file_path", lambda: str(tmp_path / "s.json"))
-    slots_hook.reset_runtime()
-    slots_hook.save_slot(1, "نص الفتحة")
-
-    main._run_slot_paste(1)
-    main.flush_actions(2.0)
-    assert io.paste_calls == 1
-    assert io.clipboard == "نسخ جديد من المستخدم"   # لم يُسترجَع النص القديم
-
-
-def test_paste_task_restores_clipboard(tmp_path, monkeypatch):
     import main
     from test_pipeline import FakeIO
 
     io = FakeIO()
     io.clipboard = "الحالي"
+    gate = threading.Event()
     monkeypatch.setattr(main, "IO", io)
+    monkeypatch.setattr(main, "sleep_fn", lambda _s: gate.wait(2.0))
     monkeypatch.setattr(slots_hook, "slots_file_path", lambda: str(tmp_path / "s.json"))
-    monkeypatch.setattr(main, "sleep_fn", lambda _s: None)
     slots_hook.reset_runtime()
     slots_hook.save_slot(1, "نص الفتحة")
 
-    main._run_slot_paste(1)
+    assert main._prepare_slot_paste(1) is True
+    assert io.clipboard == "نص الفتحة"             # جُهزت قبل وصول V
+    io.clipboard = "نسخ جديد من المستخدم"          # المستخدم نسخ أثناء اللصق
+    gate.set()
     main.flush_actions(2.0)
-    assert io.paste_calls == 1                     # لصقة واحدة فقط
-    assert io.clipboard_sets == ["نص الفتحة"]
-    assert io.clipboard == "الحالي"                # الحافظة أُعيدت كما كانت
+    assert io.clipboard == "نسخ جديد من المستخدم"   # لم يُسترجَع النص القديم
 
-    main._run_slot_paste(9)                        # فتحة فارغة: لا شيء
+
+def test_prepare_paste_restores_clipboard(tmp_path, monkeypatch):
+    import threading
+
+    import main
+    from test_pipeline import FakeIO
+
+    io = FakeIO()
+    io.clipboard = "الحالي"
+    gate = threading.Event()
+    monkeypatch.setattr(main, "IO", io)
+    monkeypatch.setattr(main, "sleep_fn", lambda _s: gate.wait(2.0))
+    monkeypatch.setattr(slots_hook, "slots_file_path", lambda: str(tmp_path / "s.json"))
+    slots_hook.reset_runtime()
+    slots_hook.save_slot(1, "نص الفتحة")
+
+    assert main._prepare_slot_paste(1) is True
+    assert io.clipboard_sets == ["نص الفتحة"]
+    assert io.clipboard == "نص الفتحة"             # التطبيق سيقرأ هذا فوراً
+    gate.set()
     main.flush_actions(2.0)
-    assert io.paste_calls == 1
+    assert io.clipboard == "الحالي"                # ثم أُعيدت كما كانت
+
+    assert main._prepare_slot_paste(9) is False    # فتحة فارغة: لا كتابة
+    main.flush_actions(2.0)
+    assert io.clipboard_sets == ["نص الفتحة"]
+    assert io.clipboard == "الحالي"
