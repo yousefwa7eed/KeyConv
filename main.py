@@ -766,8 +766,12 @@ def perform_selection_dance(io, budget_s=COPY_READ_DELAY_S, retry=True):
                      _foreground_label())
             return SELECTION_NONE
         if not selected:
-            log.info("selection aborted: copy produced no convertible text")
-            return SELECTION_NO_CHANGE
+            # بعض التطبيقات (WhatsApp مثلاً) عند عدم التحديد تفرّغ الكليبورد
+            # وتغيّر رقمه التسلسلي، فيبدو الأمر كنسخ ناجح لنص فارغ. هذا يعني
+            # عملياً "لا يوجد تحديد"، فنُعيد NONE كي يُستكمل تحويل آخر كلمة.
+            log.info("selection skipped: copy produced empty text fg=%s",
+                     _foreground_label())
+            return SELECTION_NONE
         trace("clip_selected=", repr(selected))
 
         converted = plan_selection_action(selected)

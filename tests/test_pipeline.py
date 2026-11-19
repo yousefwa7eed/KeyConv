@@ -468,6 +468,35 @@ def test_word_fallback_when_no_selection(monkeypatch):
     assert io.backspaces_total == 5
 
 
+class EmptyCopyIO(FakeIO):
+    """مثل WhatsApp: Ctrl+C بلا تحديد يفرّغ الكليبورد ويغيّر رقمه التسلسلي."""
+
+    def __init__(self):
+        super().__init__()
+        self.clipboard = "نص قديم"
+        self.seq_value = 10
+
+    def send_copy(self):
+        self.copy_calls += 1
+        self.seq_value += 4
+        self.clipboard = ""
+
+
+def test_word_fallback_when_copy_is_empty_but_seq_changes(monkeypatch):
+    main.buffer.reset()
+    io = EmptyCopyIO()
+    monkeypatch.setattr(main, "IO", io)
+    for ch in "lvpfh":
+        main.handle_key_event(ch, True)
+
+    double_tap("shift")
+    main.guard.release_now()
+
+    assert io.written == ["مرحبا"]        # نسخ فارغ = لا تحديد -> تحويل الكلمة
+    assert io.backspaces_total == 5
+    assert io.clipboard == "نص قديم"      # الكليبورد رجع كما كان
+
+
 # ── 13) رموز التحكم لا تلوّث آخر كلمة (Ctrl+C/V وغيرها) ──
 def test_control_chars_never_join_word(monkeypatch):
     io = FakeIO()
