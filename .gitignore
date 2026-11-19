@@ -1,6 +1,7 @@
 # مخرجات البناء
 /build/
 /dist/
+/dist_release/
 *.spec.bak
 
 # بايثون
